@@ -1,12 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
-import { InteractiveMapPlaceholder } from './components/InteractiveMapPlaceholder';
+import { MapContainer } from './components/MapContainer';
 import { DataGrid } from './components/DataGrid';
-import { MOCK_TRACTS, MOCK_PHARMACIES } from './data/mockData';
 import { useAGSCalculator } from './hooks/useAGSCalculator';
-import { SDoHFilters, ClinicCheckpoint, ComputedTract, Persona } from './types';
+import { SDoHFilters, ClinicCheckpoint, ComputedTract, Persona, CensusTract, Pharmacy } from './types';
 import { Sun, Moon, LayoutDashboard } from 'lucide-react';
-
+import { centroid } from '@turf/turf';
 
 export const App: React.FC = () => {
   // Theme state: default is dark
@@ -37,26 +36,158 @@ export const App: React.FC = () => {
   // Active simulated mobile clinics list
   const [mobileClinics, setMobileClinics] = useState<ClinicCheckpoint[]>([]);
 
+  // Core datasets fetched from live APIs
+  const [tracts, setTracts] = useState<CensusTract[]>([]);
+  const [pharmacies, setPharmacies] = useState<Pharmacy[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
   // AI report states
   const [aiReport, setAiReport] = useState('');
   const [aiStreaming, setAiStreaming] = useState(false);
 
-  // Dynamic score calculator custom hook
-  const computedTracts = useAGSCalculator(MOCK_TRACTS, MOCK_PHARMACIES, mobileClinics, filters);
+  // Hydrate Census demographics and pharmacy coordinates from live REST APIs
+  useEffect(() => {
+    const fetchData = async () => {
+      setIsLoading(true);
+      try {
+        const [povertyRes, vehicleRes, seniorRes, pharmaciesRes] = await Promise.all([
+          // 1. Geometries & Poverty demographics
+          fetch(
+            "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Poverty_by_Age_Boundaries/FeatureServer/2/query?where=GEOID+LIKE+%2726163%25%27&outFields=GEOID,NAME,B17020_001E,B17020_002E&returnGeometry=true&f=geojson"
+          ).then((r) => {
+            if (!r.ok) throw new Error("Poverty API failure");
+            return r.json();
+          }),
+          // 2. Vehicle ownership demographics
+          fetch(
+            "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Vehicle_Availability_Boundaries/FeatureServer/2/query?where=GEOID+LIKE+%2726163%25%27&outFields=GEOID,B08201_001E,B08201_002E&returnGeometry=false&f=json"
+          ).then((r) => {
+            if (!r.ok) throw new Error("Vehicle API failure");
+            return r.json();
+          }),
+          // 3. Elderly demographics
+          fetch(
+            "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Highlights_Senior_Well_Being_Boundaries/FeatureServer/2/query?where=GEOID+LIKE+%2726163%25%27&outFields=GEOID,B01001_001E,B01001_calc_numGE65E&returnGeometry=false&f=json"
+          ).then((r) => {
+            if (!r.ok) throw new Error("Senior API failure");
+            return r.json();
+          }),
+          // 4. Pharmacy Points (OSM Nominatim API)
+          fetch(
+            "https://nominatim.openstreetmap.org/search?q=pharmacy+in+Wayne+County+Michigan&format=geojson&limit=50"
+          ).then((r) => {
+            if (!r.ok) throw new Error("Nominatim Pharmacy API failure");
+            return r.json();
+          })
+        ]);
 
-  // Currently selected tract profile
+        // Map and lookup datasets
+        const vehicleLookup = new Map<string, any>();
+        if (vehicleRes.features) {
+          vehicleRes.features.forEach((feat: any) => {
+            const attr = feat.attributes;
+            vehicleLookup.set(attr.GEOID, attr);
+          });
+        }
+
+        const seniorLookup = new Map<string, any>();
+        if (seniorRes.features) {
+          seniorRes.features.forEach((feat: any) => {
+            const attr = feat.attributes;
+            seniorLookup.set(attr.GEOID, attr);
+          });
+        }
+
+        // Join Demographics and compile CensusTract objects
+        const loadedTracts: CensusTract[] = [];
+        if (povertyRes.features) {
+          povertyRes.features.forEach((feat: any) => {
+            const geoid = feat.properties.GEOID;
+            const rawName = feat.properties.NAME || `Tract ${geoid.substring(5)}`;
+            const name = rawName.includes("Tract") ? rawName : `Tract ${rawName}`;
+
+            // Demographics mapping
+            const povPop = feat.properties.B17020_002E || 0;
+            const povTotal = feat.properties.B17020_001E || 0;
+            const povertyRate = povTotal > 0 ? (povPop / povTotal) * 100 : 0;
+
+            const vehicleData = vehicleLookup.get(geoid) || {};
+            const vehNo = vehicleData.B08201_002E || 0;
+            const vehTotal = vehicleData.B08201_001E || 0;
+            const noVehicleRate = vehTotal > 0 ? (vehNo / vehTotal) * 100 : 0;
+
+            const seniorData = seniorLookup.get(geoid) || {};
+            const elderlyCount = seniorData.B01001_calc_numGE65E || 0;
+            const population = seniorData.B01001_001E || 0;
+            const elderlyRate = population > 0 ? (elderlyCount / population) * 100 : 0;
+
+            // Generate centroid coordinates via Turf.js
+            try {
+              if (feat.geometry && population > 0) {
+                const cent = centroid(feat);
+                const [lng, lat] = cent.geometry.coordinates;
+
+                loadedTracts.push({
+                  id: geoid,
+                  name,
+                  population,
+                  povertyRate: Math.round(povertyRate * 10) / 10,
+                  noVehicleRate: Math.round(noVehicleRate * 10) / 10,
+                  elderlyRate: Math.round(elderlyRate * 10) / 10,
+                  centroid: [lng, lat],
+                  geometry: feat.geometry
+                });
+              }
+            } catch (err) {
+              console.error("Centroid extraction failure for tract:", geoid, err);
+            }
+          });
+        }
+
+        // Map OSM pharmacies features
+        const loadedPharmacies: Pharmacy[] = [];
+        if (pharmaciesRes.features) {
+          pharmaciesRes.features.forEach((feat: any, idx: number) => {
+            const name = feat.properties.name || feat.properties.display_name.split(",")[0] || "Community Pharmacy";
+            const address = feat.properties.display_name;
+            const [lng, lat] = feat.geometry.coordinates;
+
+            loadedPharmacies.push({
+              id: feat.properties.place_id ? String(feat.properties.place_id) : `pharm-${idx}`,
+              name,
+              address,
+              coordinates: [lng, lat]
+            });
+          });
+        }
+
+        setTracts(loadedTracts);
+        setPharmacies(loadedPharmacies);
+      } catch (error) {
+        console.error("Geospatial demographic hydration failure:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchData();
+  }, []);
+
+  // Dynamic SDoH score calculator custom hook (Turf-integrated)
+  const computedTracts = useAGSCalculator(tracts, pharmacies, mobileClinics, filters);
+
+  // Selected tract profile memoized lookup
   const selectedTract = useMemo(() => {
     if (!selectedTractId) return null;
     return computedTracts.find(t => t.id === selectedTractId) || null;
   }, [selectedTractId, computedTracts]);
 
   // Handle adding mobile clinics via sidebar button or map-click
-  const handleAddClinic = (x: number, y: number, label: string) => {
+  const handleAddClinic = (lng: number, lat: number, label: string) => {
     const newClinic: ClinicCheckpoint = {
       id: `clinic-${Date.now()}`,
       label,
-      x,
-      y,
+      coordinates: [lng, lat],
       isSimulated: true,
       createdAt: new Date().toISOString()
     };
@@ -65,7 +196,7 @@ export const App: React.FC = () => {
 
   const handleSimulateClinicForTract = (tract: ComputedTract) => {
     // Place simulated clinic directly at the tract's center coordinates
-    handleAddClinic(tract.x, tract.y, `Site: ${tract.name.split(' (')[0]}`);
+    handleAddClinic(tract.centroid[0], tract.centroid[1], `Site: ${tract.name.split(' (')[0]}`);
   };
 
   const handleRemoveClinic = (id: string) => {
@@ -139,7 +270,6 @@ RECOMMENDATION:
     // Check for API key (use type cast to avoid compiler errors on import.meta)
     const apiKey = (import.meta as { env?: Record<string, string> }).env?.VITE_AI_API_KEY;
 
-
     if (apiKey) {
       try {
         const prompt = `Act as an expert Healthcare Enterprise Product Consultant and Spatial SDoH Optimization Planner.
@@ -181,7 +311,6 @@ Keep the tone clinical, professional, and actionable. Output in valid Markdown.`
 
       } catch (err) {
         console.error('Failed calling Gemini API. Falling back to local generation.', err);
-        // Fallback below
       }
     }
 
@@ -193,7 +322,7 @@ Keep the tone clinical, professional, and actionable. Output in valid Markdown.`
 
       planContent = `# STRATEGIC DEPLOYMENT OPTIMIZATION PLAN
 Generated on: ${new Date().toLocaleDateString()}
-Target Region: AegisMap Metropolitan Grid
+Target Region: Wayne County, Detroit, MI
 High-Risk Focus Zones: 
 * ${firstTract.name} (AGS: ${firstTract.ags})
 * ${secondTract.name} (AGS: ${secondTract.ags})
@@ -205,15 +334,15 @@ High-Risk Focus Zones:
 To maximize population coverage and mitigate the high SDoH penalties, we recommend deploying a single mobile unit on a split-weekly rotation:
 
 * **Mondays & Wednesdays: Eastern Corridor Loop**
-  * Primary Node: Centered near ${firstTract.name} (Grid Coordinate X:${firstTract.x}%, Y:${firstTract.y}%).
+  * Primary Node: Centered near ${firstTract.name} (Centroid: ${firstTract.centroid[1].toFixed(4)}° N, ${firstTract.centroid[0].toFixed(4)}° E).
   * Justification: High density of elderly populations (${firstTract.elderlyRate}%) who lack vehicular travel options. Focus on chronic medication prescription distribution.
   
 * **Tuesdays & Thursdays: Southern Border Corridor**
-  * Primary Node: Centered near ${secondTract.name} (Grid Coordinate X:${secondTract.x}%, Y:${secondTract.y}%).
+  * Primary Node: Centered near ${secondTract.name} (Centroid: ${secondTract.centroid[1].toFixed(4)}° N, ${secondTract.centroid[0].toFixed(4)}° E).
   * Justification: Extreme poverty rates (${secondTract.povertyRate}%) combined with severe vehicle deficits (${secondTract.noVehicleRate}%).
   
 * **Fridays: Community Center Outreach**
-  * Secondary Node: Centered near ${thirdTract.name} (Grid Coordinate X:${thirdTract.x}%, Y:${thirdTract.y}%).
+  * Secondary Node: Centered near ${thirdTract.name} (Centroid: ${thirdTract.centroid[1].toFixed(4)}° N, ${thirdTract.centroid[0].toFixed(4)}° E).
   * Justification: General SDoH relief, vaccination clinics, and telemedicine signup support.
 
 ---
@@ -306,9 +435,9 @@ Use this tailored outreach template during on-site visits to encourage pharmacy 
         <main className="flex-1 flex flex-col overflow-hidden min-h-0 bg-slate-950">
           {/* Map display */}
           <div className="flex-1 min-h-0 relative">
-            <InteractiveMapPlaceholder
+            <MapContainer
               computedTracts={computedTracts}
-              pharmacies={MOCK_PHARMACIES}
+              pharmacies={pharmacies}
               mobileClinics={mobileClinics}
               selectedTract={selectedTract}
               setSelectedTract={(t) => setSelectedTractId(t ? t.id : null)}
@@ -316,6 +445,7 @@ Use this tailored outreach template during on-site visits to encourage pharmacy 
               onRemoveClinic={handleRemoveClinic}
               activePersona={activePersona}
               filters={filters}
+              isLoading={isLoading}
             />
           </div>
 

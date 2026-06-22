@@ -95,8 +95,9 @@ export const DataGrid: React.FC<DataGridProps> = ({
                 <div className="flex items-center gap-1 justify-end">Age 65+ % {getSortIcon('elderlyRate')}</div>
               </th>
               <th className="py-2.5 px-4 cursor-pointer hover:bg-slate-800 hover:text-slate-100 transition-colors" onClick={() => handleSort('distanceToNearestPharmacy')}>
-                <div className="flex items-center gap-1 justify-end">Nearest Rx (u) {getSortIcon('distanceToNearestPharmacy')}</div>
+                <div className="flex items-center gap-1 justify-end">Nearest Rx (mi) {getSortIcon('distanceToNearestPharmacy')}</div>
               </th>
+
               <th className="py-2.5 px-4 cursor-pointer hover:bg-slate-800 hover:text-slate-100 transition-colors" onClick={() => handleSort('ags')}>
                 <div className="flex items-center gap-1 justify-end">Calculated AGS {getSortIcon('ags')}</div>
               </th>

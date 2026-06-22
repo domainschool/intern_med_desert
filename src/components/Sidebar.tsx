@@ -225,8 +225,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
             <div className="flex justify-between items-center text-xs">
               <span className="text-slate-400">Nearest Pharmacy Distance:</span>
-              <span className="font-semibold text-slate-200">{selectedTract.distanceToNearestPharmacy} units</span>
+              <span className="font-semibold text-slate-200">{selectedTract.distanceToNearestPharmacy} miles</span>
             </div>
+
 
             {selectedTract.isMitigated ? (
               <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs py-2 px-3 rounded-lg text-center font-medium">
