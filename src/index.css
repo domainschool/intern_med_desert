@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased selection:bg-teal-500 selection:text-slate-950;
+  }
+}
+
+/* Custom premium scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-slate-900;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-slate-800 rounded-full hover:bg-slate-700 transition-colors;
+}
+
+/* Glowing animation for active map markers */
+@keyframes pulse-glow {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.9;
+    filter: drop-shadow(0 0 4px rgba(20, 184, 166, 0.6));
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+    filter: drop-shadow(0 0 12px rgba(20, 184, 166, 0.9));
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s infinite ease-in-out;
+}
+
+@keyframes pulse-glow-red {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.8;
+    filter: drop-shadow(0 0 4px rgba(244, 63, 94, 0.4));
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 1;
+    filter: drop-shadow(0 0 10px rgba(244, 63, 94, 0.7));
+  }
+}
+
+.animate-pulse-glow-red {
+  animation: pulse-glow-red 2.5s infinite ease-in-out;
+}
+
+/* Micro-animations and utility classes */
+.glass-panel {
+  @apply bg-slate-900/60 backdrop-blur-md border border-slate-800/80;
+}
+
+.glass-card-hover {
+  @apply transition-all duration-300 hover:border-slate-700/80 hover:bg-slate-900/80 hover:shadow-lg hover:shadow-slate-950/40;
+}
