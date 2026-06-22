@@ -1,10 +1,11 @@
-import React, { useMemo } from 'react';
-import { MapContainer as LeafletMap, TileLayer, GeoJSON, Marker, Circle, useMapEvents } from 'react-leaflet';
+import React, { useMemo, useEffect } from 'react';
+import { MapContainer as LeafletMap, TileLayer, GeoJSON, Marker, Circle, useMapEvents, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { ComputedTract, Pharmacy, ClinicCheckpoint, Persona } from '../types';
 import { RefreshCw, Navigation, Map as MapIcon } from 'lucide-react';
 import { FeatureCollection, Feature, Geometry } from 'geojson';
+
 
 // Fix default leaflet icon issues in Vite
 L.Icon.Default.mergeOptions({
@@ -53,6 +54,8 @@ interface MapContainerProps {
     elderlyWeight: number;
   };
   isLoading: boolean;
+  zipCentroid: [number, number] | null;
+  zipBbox: [number, number, number, number] | null;
 }
 
 // Sub-component to capture map clicks
@@ -69,6 +72,25 @@ const MapClickHandler: React.FC<{
   return null;
 };
 
+// Sub-component to control map viewport based on geocoded ZIP code
+const MapController: React.FC<{
+  center: [number, number] | null;
+  bbox: [number, number, number, number] | null;
+}> = ({ center, bbox }) => {
+  const map = useMap();
+
+  useEffect(() => {
+    if (bbox) {
+      const [minLon, minLat, maxLon, maxLat] = bbox;
+      map.fitBounds([[minLat, minLon], [maxLat, maxLon]], { padding: [30, 30] });
+    } else if (center) {
+      map.setView(center, 13);
+    }
+  }, [center, bbox, map]);
+
+  return null;
+};
+
 export const MapContainer: React.FC<MapContainerProps> = ({
   computedTracts,
   pharmacies,
@@ -79,7 +101,10 @@ export const MapContainer: React.FC<MapContainerProps> = ({
   activePersona,
   filters,
   isLoading,
+  zipCentroid,
+  zipBbox,
 }) => {
+
   const [clickLatLng, setClickLatLng] = React.useState<{ lat: number; lng: number } | null>(null);
   const [newClinicLabel, setNewClinicLabel] = React.useState('');
 
@@ -237,6 +262,9 @@ export const MapContainer: React.FC<MapContainerProps> = ({
 
           {/* Map Event Click Handler */}
           <MapClickHandler onMapClick={handleMapClick} activePersona={activePersona} />
+
+          {/* Map Viewport Controller for ZIP code geocoding */}
+          <MapController center={zipCentroid} bbox={zipBbox} />
 
           {/* Census Tract GeoJSON Layer */}
           {computedTracts.length > 0 && (

@@ -34,12 +34,19 @@ interface SidebarProps {
   aiStreaming: boolean;
   aiReport: string;
   onGenerateAIPlan: () => void;
+  zipQuery: string;
+  setZipQuery: (zip: string) => void;
+  onSearchZip: () => void;
+  onClearZip: () => void;
+  activeZip: string | null;
+  isSearchingZip: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   filters,
   setFilters,
   selectedTract,
+  computedTracts,
   onSimulateClinic,
   activePersona,
   setActivePersona,
@@ -50,8 +57,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   setActiveTab,
   aiStreaming,
   aiReport,
-  onGenerateAIPlan
+  onGenerateAIPlan,
+  zipQuery,
+  setZipQuery,
+  onSearchZip,
+  onClearZip,
+  activeZip,
+  isSearchingZip
 }) => {
+
 
   const handleWeightChange = (key: 'povertyWeight' | 'noVehicleWeight' | 'elderlyWeight', val: number) => {
     setFilters(prev => {
@@ -265,18 +279,76 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="space-y-6">
             
             {/* Filter Search */}
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                <Search className="w-3.5 h-3.5" /> Search Census Tracts
-              </label>
-              <input
-                type="text"
-                placeholder="Search by tract number..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg py-2 px-3 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-teal-500/50"
-              />
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Search className="w-3.5 h-3.5" /> Search Census Tracts
+                </label>
+                <input
+                  type="text"
+                  placeholder="Search by tract number..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg py-2 px-3 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-teal-500/50"
+                />
+              </div>
+
+              {/* ZIP Code Search */}
+              <div className="space-y-2 pt-2 border-t border-slate-800/40">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                    <MapPin className="w-3.5 h-3.5 text-teal-400" /> ZIP Code Area Search
+                  </label>
+                  <span className="text-[9px] text-slate-500 font-mono">Wayne County, MI</span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    maxLength={5}
+                    placeholder="e.g. 48201 (Detroit)"
+                    value={zipQuery}
+                    onChange={(e) => setZipQuery(e.target.value.replace(/\D/g, ''))}
+                    className="flex-1 bg-slate-950 border border-slate-800 rounded-lg py-2 px-3 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-teal-500/50"
+                  />
+                  <button
+                    onClick={onSearchZip}
+                    disabled={isSearchingZip || zipQuery.length !== 5}
+                    className="px-3 py-2 bg-teal-500 hover:bg-teal-400 text-slate-950 text-xs font-bold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isSearchingZip ? "..." : "Search"}
+                  </button>
+                </div>
+                {activeZip && (
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center bg-teal-500/10 border border-teal-500/20 text-teal-400 text-[11px] py-1 px-2.5 rounded-lg">
+                      <span>Filtering: ZIP <b>{activeZip}</b></span>
+                      <button
+                        onClick={onClearZip}
+                        className="text-teal-400 hover:text-teal-200 font-bold ml-2 underline"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    
+                    {/* Warning if ZIP code geocoded to an area with no tracts (i.e. outside Detroit/Wayne County) */}
+                    {computedTracts.length === 0 && (
+                      <div className="bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs p-2.5 rounded-lg space-y-1">
+                        <p className="font-bold flex items-center gap-1">
+                          <ShieldAlert className="w-3.5 h-3.5" /> Outside Coverage Area
+                        </p>
+                        <p className="text-[10px] leading-relaxed text-rose-300">
+                          ZIP <b>{activeZip}</b> is outside the Detroit/Wayne County active data region. No census tracts found in this area.
+                        </p>
+                        <p className="text-[10px] leading-relaxed text-slate-400">
+                          Please try a Detroit ZIP code (e.g. <b>48201</b>, <b>48202</b>, <b>48206</b>, or <b>48208</b>).
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
+
 
             {/* SDoH Formula Weights Slider (Only Regional Director edits weights) */}
             <div className="space-y-4">

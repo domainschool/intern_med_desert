@@ -2,14 +2,18 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { MapContainer } from './components/MapContainer';
 import { DataGrid } from './components/DataGrid';
+import { AboutDeck } from './components/AboutDeck';
 import { useAGSCalculator } from './hooks/useAGSCalculator';
 import { SDoHFilters, ClinicCheckpoint, ComputedTract, Persona, CensusTract, Pharmacy } from './types';
-import { Sun, Moon, LayoutDashboard } from 'lucide-react';
+import { Sun, Moon, LayoutDashboard, HelpCircle } from 'lucide-react';
 import { centroid } from '@turf/turf';
 
 export const App: React.FC = () => {
   // Theme state: default is dark
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+
+  // About overlay state
+  const [showAbout, setShowAbout] = useState(false);
   
   // Persona state: default is Field Operator
   const [activePersona, setActivePersona] = useState<Persona>('Field Operator');
@@ -45,136 +49,240 @@ export const App: React.FC = () => {
   const [aiReport, setAiReport] = useState('');
   const [aiStreaming, setAiStreaming] = useState(false);
 
-  // Hydrate Census demographics and pharmacy coordinates from live REST APIs
-  useEffect(() => {
-    const fetchData = async () => {
-      setIsLoading(true);
-      try {
-        const [povertyRes, vehicleRes, seniorRes, pharmaciesRes] = await Promise.all([
-          // 1. Geometries & Poverty demographics
-          fetch(
-            "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Poverty_by_Age_Boundaries/FeatureServer/2/query?where=GEOID+LIKE+%2726163%25%27&outFields=GEOID,NAME,B17020_001E,B17020_002E&returnGeometry=true&f=geojson"
-          ).then((r) => {
-            if (!r.ok) throw new Error("Poverty API failure");
-            return r.json();
-          }),
-          // 2. Vehicle ownership demographics
-          fetch(
-            "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Vehicle_Availability_Boundaries/FeatureServer/2/query?where=GEOID+LIKE+%2726163%25%27&outFields=GEOID,B08201_001E,B08201_002E&returnGeometry=false&f=json"
-          ).then((r) => {
-            if (!r.ok) throw new Error("Vehicle API failure");
-            return r.json();
-          }),
-          // 3. Elderly demographics
-          fetch(
-            "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Highlights_Senior_Well_Being_Boundaries/FeatureServer/2/query?where=GEOID+LIKE+%2726163%25%27&outFields=GEOID,B01001_001E,B01001_calc_numGE65E&returnGeometry=false&f=json"
-          ).then((r) => {
-            if (!r.ok) throw new Error("Senior API failure");
-            return r.json();
-          }),
-          // 4. Pharmacy Points (OSM Nominatim API)
-          fetch(
-            "https://nominatim.openstreetmap.org/search?q=pharmacy+in+Wayne+County+Michigan&format=geojson&limit=50"
-          ).then((r) => {
-            if (!r.ok) throw new Error("Nominatim Pharmacy API failure");
-            return r.json();
-          })
-        ]);
+  // ZIP Code Search states
+  const [zipQuery, setZipQuery] = useState('');
+  const [activeZip, setActiveZip] = useState<string | null>(null);
+  const [zipCentroid, setZipCentroid] = useState<[number, number] | null>(null);
+  const [zipBbox, setZipBbox] = useState<[number, number, number, number] | null>(null);
+  const [isSearchingZip, setIsSearchingZip] = useState(false);
 
-        // Map and lookup datasets
-        const vehicleLookup = new Map<string, any>();
-        if (vehicleRes.features) {
-          vehicleRes.features.forEach((feat: any) => {
+
+  // Helper to chunk arrays to prevent too long URL strings when querying GEOID IN (...)
+  const chunkArray = <T,>(arr: T[], size: number): T[][] => {
+    const chunks: T[][] = [];
+    for (let i = 0; i < arr.length; i += size) {
+      chunks.push(arr.slice(i, i + size));
+    }
+    return chunks;
+  };
+
+  const fetchRegionData = async (bbox: [number, number, number, number], isDefaultWayneCounty: boolean) => {
+    setIsLoading(true);
+    try {
+      const [minLon, minLat, maxLon, maxLat] = bbox;
+      
+      // 1. Fetch Poverty and geometries from Esri via bounding box or default Wayne County GEOID query
+      const povertyUrl = isDefaultWayneCounty
+        ? "https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Poverty_by_Age_Boundaries/FeatureServer/2/query?where=GEOID+LIKE+%2726163%25%27&outFields=GEOID,NAME,B17020_001E,B17020_002E&returnGeometry=true&f=geojson"
+        : `https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Poverty_by_Age_Boundaries/FeatureServer/2/query?where=1%3D1&geometry=${minLon},${minLat},${maxLon},${maxLat}&geometryType=esriGeometryEnvelope&spatialRel=esriSpatialRelIntersects&inSR=4326&outSR=4326&outFields=GEOID,NAME,B17020_001E,B17020_002E&returnGeometry=true&f=geojson`;
+
+      const povertyRes = await fetch(povertyUrl).then((r) => {
+        if (!r.ok) throw new Error("Poverty API failure");
+        return r.json();
+      });
+
+      // Extract GEOIDs to fetch corresponding Vehicle & Senior records
+      const geoids = (povertyRes.features || []).map((feat: any) => feat.properties.GEOID);
+
+      if (geoids.length === 0) {
+        setTracts([]);
+        setPharmacies([]);
+        return;
+      }
+
+      // Chunk GEOIDs to prevent hitting URL length limit
+      const geoidChunks = chunkArray(geoids, 100);
+
+      // 2. Fetch Vehicle ownership demographics for chunks
+      const vehiclePromises = geoidChunks.map(chunk => {
+        const geoidList = chunk.map(id => `'${id}'`).join(',');
+        const url = `https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Vehicle_Availability_Boundaries/FeatureServer/2/query?where=GEOID+IN+%28${encodeURIComponent(geoidList)}%29&outFields=GEOID,B08201_001E,B08201_002E&returnGeometry=false&f=json`;
+        return fetch(url).then(r => {
+          if (!r.ok) throw new Error("Vehicle API failure");
+          return r.json();
+        });
+      });
+
+      // 3. Fetch Elderly demographics for chunks
+      const seniorPromises = geoidChunks.map(chunk => {
+        const geoidList = chunk.map(id => `'${id}'`).join(',');
+        const url = `https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/ACS_Highlights_Senior_Well_Being_Boundaries/FeatureServer/2/query?where=GEOID+IN+%28${encodeURIComponent(geoidList)}%29&outFields=GEOID,B01001_001E,B01001_calc_numGE65E&returnGeometry=false&f=json`;
+        return fetch(url).then(r => {
+          if (!r.ok) throw new Error("Senior API failure");
+          return r.json();
+        });
+      });
+
+      // 4. Fetch Pharmacies from OSM Nominatim (within bounding box or default query)
+      const pharmaciesUrl = isDefaultWayneCounty
+        ? "https://nominatim.openstreetmap.org/search?q=pharmacy+in+Wayne+County+Michigan&format=geojson&limit=50"
+        : `https://nominatim.openstreetmap.org/search?q=pharmacy&viewbox=${minLon},${maxLat},${maxLon},${minLat}&bounded=1&format=geojson&limit=50`;
+
+      const pharmaciesPromise = fetch(pharmaciesUrl).then((r) => {
+        if (!r.ok) throw new Error("Nominatim Pharmacy API failure");
+        return r.json();
+      });
+
+      // Resolve all dynamic queries concurrently
+      const [vehicleResults, seniorResults, pharmaciesRes] = await Promise.all([
+        Promise.all(vehiclePromises),
+        Promise.all(seniorPromises),
+        pharmaciesPromise
+      ]);
+
+      // Compile vehicle lookup
+      const vehicleLookup = new Map<string, any>();
+      vehicleResults.forEach((res: any) => {
+        if (res.features) {
+          res.features.forEach((feat: any) => {
             const attr = feat.attributes;
             vehicleLookup.set(attr.GEOID, attr);
           });
         }
+      });
 
-        const seniorLookup = new Map<string, any>();
-        if (seniorRes.features) {
-          seniorRes.features.forEach((feat: any) => {
+      // Compile senior lookup
+      const seniorLookup = new Map<string, any>();
+      seniorResults.forEach((res: any) => {
+        if (res.features) {
+          res.features.forEach((feat: any) => {
             const attr = feat.attributes;
             seniorLookup.set(attr.GEOID, attr);
           });
         }
+      });
 
-        // Join Demographics and compile CensusTract objects
-        const loadedTracts: CensusTract[] = [];
-        if (povertyRes.features) {
-          povertyRes.features.forEach((feat: any) => {
-            const geoid = feat.properties.GEOID;
-            const rawName = feat.properties.NAME || `Tract ${geoid.substring(5)}`;
-            const name = rawName.includes("Tract") ? rawName : `Tract ${rawName}`;
+      // Join Demographics and compile CensusTract objects
+      const loadedTracts: CensusTract[] = [];
+      if (povertyRes.features) {
+        povertyRes.features.forEach((feat: any) => {
+          const geoid = feat.properties.GEOID;
+          const rawName = feat.properties.NAME || `Tract ${geoid.substring(5)}`;
+          const name = rawName.includes("Tract") ? rawName : `Tract ${rawName}`;
 
-            // Demographics mapping
-            const povPop = feat.properties.B17020_002E || 0;
-            const povTotal = feat.properties.B17020_001E || 0;
-            const povertyRate = povTotal > 0 ? (povPop / povTotal) * 100 : 0;
+          // Demographics mapping
+          const povPop = feat.properties.B17020_002E || 0;
+          const povTotal = feat.properties.B17020_001E || 0;
+          const povertyRate = povTotal > 0 ? (povPop / povTotal) * 100 : 0;
 
-            const vehicleData = vehicleLookup.get(geoid) || {};
-            const vehNo = vehicleData.B08201_002E || 0;
-            const vehTotal = vehicleData.B08201_001E || 0;
-            const noVehicleRate = vehTotal > 0 ? (vehNo / vehTotal) * 100 : 0;
+          const vehicleData = vehicleLookup.get(geoid) || {};
+          const vehNo = vehicleData.B08201_002E || 0;
+          const vehTotal = vehicleData.B08201_001E || 0;
+          const noVehicleRate = vehTotal > 0 ? (vehNo / vehTotal) * 100 : 0;
 
-            const seniorData = seniorLookup.get(geoid) || {};
-            const elderlyCount = seniorData.B01001_calc_numGE65E || 0;
-            const population = seniorData.B01001_001E || 0;
-            const elderlyRate = population > 0 ? (elderlyCount / population) * 100 : 0;
+          const seniorData = seniorLookup.get(geoid) || {};
+          const elderlyCount = seniorData.B01001_calc_numGE65E || 0;
+          const population = seniorData.B01001_001E || 0;
+          const elderlyRate = population > 0 ? (elderlyCount / population) * 100 : 0;
 
-            // Generate centroid coordinates via Turf.js
-            try {
-              if (feat.geometry && population > 0) {
-                const cent = centroid(feat);
-                const [lng, lat] = cent.geometry.coordinates;
+          // Generate centroid coordinates via Turf.js
+          try {
+            if (feat.geometry && population > 0) {
+              const cent = centroid(feat);
+              const [lng, lat] = cent.geometry.coordinates;
 
-                loadedTracts.push({
-                  id: geoid,
-                  name,
-                  population,
-                  povertyRate: Math.round(povertyRate * 10) / 10,
-                  noVehicleRate: Math.round(noVehicleRate * 10) / 10,
-                  elderlyRate: Math.round(elderlyRate * 10) / 10,
-                  centroid: [lng, lat],
-                  geometry: feat.geometry
-                });
-              }
-            } catch (err) {
-              console.error("Centroid extraction failure for tract:", geoid, err);
+              loadedTracts.push({
+                id: geoid,
+                name,
+                population,
+                povertyRate: Math.round(povertyRate * 10) / 10,
+                noVehicleRate: Math.round(noVehicleRate * 10) / 10,
+                elderlyRate: Math.round(elderlyRate * 10) / 10,
+                centroid: [lng, lat],
+                geometry: feat.geometry
+              });
             }
-          });
-        }
-
-        // Map OSM pharmacies features
-        const loadedPharmacies: Pharmacy[] = [];
-        if (pharmaciesRes.features) {
-          pharmaciesRes.features.forEach((feat: any, idx: number) => {
-            const name = feat.properties.name || feat.properties.display_name.split(",")[0] || "Community Pharmacy";
-            const address = feat.properties.display_name;
-            const [lng, lat] = feat.geometry.coordinates;
-
-            loadedPharmacies.push({
-              id: feat.properties.place_id ? String(feat.properties.place_id) : `pharm-${idx}`,
-              name,
-              address,
-              coordinates: [lng, lat]
-            });
-          });
-        }
-
-        setTracts(loadedTracts);
-        setPharmacies(loadedPharmacies);
-      } catch (error) {
-        console.error("Geospatial demographic hydration failure:", error);
-      } finally {
-        setIsLoading(false);
+          } catch (err) {
+            console.error("Centroid extraction failure for tract:", geoid, err);
+          }
+        });
       }
-    };
 
-    fetchData();
+      // Map OSM pharmacies features
+      const loadedPharmacies: Pharmacy[] = [];
+      if (pharmaciesRes.features) {
+        pharmaciesRes.features.forEach((feat: any, idx: number) => {
+          const name = feat.properties.name || feat.properties.display_name.split(",")[0] || "Community Pharmacy";
+          const address = feat.properties.display_name;
+          const [lng, lat] = feat.geometry.coordinates;
+
+          loadedPharmacies.push({
+            id: feat.properties.place_id ? String(feat.properties.place_id) : `pharm-${idx}`,
+            name,
+            address,
+            coordinates: [lng, lat]
+          });
+        });
+      }
+
+      setTracts(loadedTracts);
+      setPharmacies(loadedPharmacies);
+    } catch (error) {
+      console.error("Geospatial demographic hydration failure:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Load default Wayne County region on mount
+  useEffect(() => {
+    fetchRegionData([-83.5442, 42.0019, -82.9099, 42.4503], true);
   }, []);
 
+  // Filter tracts by ZIP bounding box first if active (double-check boundary alignment)
+  const filteredTractsByZip = useMemo(() => {
+    if (!activeZip || !zipBbox) return tracts;
+    const [minLon, minLat, maxLon, maxLat] = zipBbox;
+    return tracts.filter((t) => {
+      const [lng, lat] = t.centroid;
+      return lng >= minLon && lng <= maxLon && lat >= minLat && lat <= maxLat;
+    });
+  }, [tracts, activeZip, zipBbox]);
+
   // Dynamic SDoH score calculator custom hook (Turf-integrated)
-  const computedTracts = useAGSCalculator(tracts, pharmacies, mobileClinics, filters);
+  const computedTracts = useAGSCalculator(filteredTractsByZip, pharmacies, mobileClinics, filters);
+
+  // ZIP search geocoding and dynamic region fetching logic
+  const handleSearchZip = async () => {
+    if (zipQuery.length !== 5) return;
+    setIsSearchingZip(true);
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?postalcode=${zipQuery}&country=United+States&format=geojson`
+      );
+      if (!response.ok) throw new Error("ZIP geocoding failed");
+      const res = await response.json();
+      
+      if (res.features && res.features.length > 0) {
+        const feat = res.features[0];
+        const bbox = feat.bbox; // [minLon, minLat, maxLon, maxLat]
+        const [lng, lat] = feat.geometry.coordinates;
+        setActiveZip(zipQuery);
+        setZipCentroid([lat, lng]); // LatLng for leaflet setView
+        setZipBbox(bbox);
+
+        // Fetch dynamic Demographics & Pharmacies for the geocoded bounding box
+        await fetchRegionData(bbox, false);
+      } else {
+        alert(`ZIP Code "${zipQuery}" not found. Please verify the 5-digit ZIP.`);
+      }
+    } catch (err) {
+      console.error("Geocoding failure:", err);
+      alert("Failed to find ZIP code. Please verify network connectivity.");
+    } finally {
+      setIsSearchingZip(false);
+    }
+  };
+
+  const handleClearZip = async () => {
+    setActiveZip(null);
+    setZipQuery('');
+    setZipCentroid(null);
+    setZipBbox(null);
+    // Restore default Wayne County dataset
+    await fetchRegionData([-83.5442, 42.0019, -82.9099, 42.4503], true);
+  };
+
 
   // Selected tract profile memoized lookup
   const selectedTract = useMemo(() => {
@@ -398,6 +506,17 @@ Use this tailored outreach template during on-site visits to encourage pharmacy 
 
         {/* Global Controls */}
         <div className="flex items-center gap-3">
+          {/* About / Learning Deck Trigger Button */}
+          <button
+            onClick={() => setShowAbout(true)}
+            className="flex items-center gap-2 py-1.5 px-3 rounded-lg bg-teal-500/10 text-teal-600 dark:text-teal-400 border border-teal-500/20 hover:bg-teal-500/20 transition-all text-xs font-bold shadow-sm"
+            title="Open SDoH Learning Deck & Systems Architecture"
+            id="learning-deck-btn"
+          >
+            <HelpCircle className="w-4 h-4" />
+            <span>Learning Deck</span>
+          </button>
+
           {/* Theme Toggle Button */}
           <button
             onClick={toggleTheme}
@@ -429,6 +548,12 @@ Use this tailored outreach template during on-site visits to encourage pharmacy 
           aiStreaming={aiStreaming}
           aiReport={aiReport}
           onGenerateAIPlan={handleGenerateAIPlan}
+          zipQuery={zipQuery}
+          setZipQuery={setZipQuery}
+          onSearchZip={handleSearchZip}
+          onClearZip={handleClearZip}
+          activeZip={activeZip}
+          isSearchingZip={isSearchingZip}
         />
 
         {/* Right Panel Layout (2/3 Width) - Map & Data Grid stack */}
@@ -446,8 +571,11 @@ Use this tailored outreach template during on-site visits to encourage pharmacy 
               activePersona={activePersona}
               filters={filters}
               isLoading={isLoading}
+              zipCentroid={zipCentroid}
+              zipBbox={zipBbox}
             />
           </div>
+
 
           {/* Census Tract Demographic Data Grid */}
           <DataGrid
@@ -458,6 +586,11 @@ Use this tailored outreach template during on-site visits to encourage pharmacy 
           />
         </main>
       </div>
+
+      {/* Interactive About / Learning Deck Modal Overlay */}
+      {showAbout && (
+        <AboutDeck onClose={() => setShowAbout(false)} />
+      )}
 
     </div>
   );
